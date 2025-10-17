@@ -1,0 +1,106 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2025
+
+    steps:
+      - name: Create RDP User with Secure Password
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper = [char[]](65..90)
+              Lower = [char[]](97..122)
+              Number = [char[]](48..57)
+              Special = [char[]](33..47 + 58..64 + 91..96 + 123..126)
+          }
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object {Get-Random})
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Write-Host "🔑 RDP_CREDENTIALS: User=RDP | Password=$password"
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          Write-Host "📦 Downloading Tailscale..."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+          if (-not (Test-Path $installer)) {
+            Write-Error "❌ Download failed: tailscale.msi not found!"
+            exit 1
+          }
+          Write-Host "✅ Installer downloaded, running setup..."
+          Start-Process msiexec.exe -Wait -ArgumentList "/i $installer /qn"
+          Start-Sleep -Seconds 8
+          Write-Host "✅ Tailscale installation attempt finished."
+
+      - name: Start Tailscale and show IP
+        shell: powershell
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          Write-Host "🚀 Checking for tailscale.exe..."
+          $possiblePaths = @(
+            "C:\Program Files\Tailscale IPN\tailscale.exe",
+            "C:\Program Files\Tailscale\tailscale.exe",
+            "C:\Windows\System32\tailscale.exe"
+          )
+
+          $tailscale = $null
+          foreach ($path in $possiblePaths) {
+            if (Test-Path $path) {
+              $tailscale = $path
+              break
+            }
+          }
+
+          if (-not $tailscale) {
+            Write-Host "⚠️ Not found in common paths, trying PATH..."
+            $tailscale = (Get-Command tailscale.exe -ErrorAction SilentlyContinue)?.Source
+          }
+
+          if (-not $tailscale) {
+            Write-Error "❌ Still can't find tailscale.exe"
+            Get-ChildItem "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
+
+          Write-Host "✅ Found Tailscale at: $tailscale"
+
+          if (-not $env:TAILSCALE_AUTHKEY) {
+            Write-Error "❌ TAILSCALE_AUTHKEY not set!"
+            exit 1
+          }
+
+          Write-Host "🔐 Connecting to Tailscale network..."
+          & $tailscale up --authkey $env:TAILSCALE_AUTHKEY --accept-routes --accept-dns
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "❌ tailscale up failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+
+          Write-Host "🌐 Tailscale IPs:"
+          & $tailscale ip -4
+          ipconfig
+
+      - name: Enable Remote Desktop
+        shell: powershell
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "✅ Remote Desktop Enabled"
