@@ -43,17 +43,17 @@ jobs:
         $password = -join ($tempPassword | Sort-Object { Get-Random })
         $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
         
-        # Create user - تم التصحيح هنا
+        # Create user
         New-LocalUser -Name "RDPUser" -Password $securePassword -Description "RDP Access User"
         
-        # Add to groups - تم التصحيح هنا
+        # Add to groups
         Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
         
-        # Store credentials in environment variable - تم التصحيح هنا
+        # Store credentials
         echo "RDP_CREDS=User: RDPUser | Password: $password" >> $env:GITHUB_ENV
         
-        # Verify user creation - تم التصحيح هنا
+        # Verify user creation
         if (-not (Get-LocalUser -Name "RDPUser" -ErrorAction SilentlyContinue)) {
             Write-Error "User creation failed"
             exit 1
@@ -61,37 +61,88 @@ jobs:
 
     - name: Install Tailscale
       run: |
-        # الرابط الصحيح
+        # استخدام رابط مباشر وموثوق
         $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
         $tsInstallerPath = "$env:TEMP\tailscale.msi"
         
-        # Download Tailscale
-        Invoke-WebRequest -Uri $tsurl -OutFile $tsInstallerPath
+        # تحميل Tailscale مع معالجة الأخطاء
+        try {
+            Write-Host "Downloading Tailscale from: $tsurl"
+            Invoke-WebRequest -Uri $tsurl -OutFile $tsInstallerPath -UserAgent "GitHub-Actions"
+            
+            # التحقق من أن الملف تم تحميله
+            if (Test-Path $tsInstallerPath) {
+                Write-Host "Download successful! File size: $((Get-Item $tsInstallerPath).Length) bytes"
+            } else {
+                Write-Error "Download failed - file not found"
+                exit 1
+            }
+        }
+        catch {
+            Write-Error "Download failed: $($_.Exception.Message)"
+            exit 1
+        }
         
-        # Install silently
-        Start-Process msiexec -ArgumentList "/i", "$tsInstallerPath", "/quiet", "/norestart" -Wait
+        # التثبيت
+        Write-Host "Installing Tailscale..."
+        Start-Process msiexec -ArgumentList "/i", "`"$tsInstallerPath`"", "/quiet", "/norestart" -Wait -NoNewWindow
         
-        # Wait for installation
+        # الانتظار للتثبيت
         Start-Sleep -Seconds 30
+        Write-Host "Tailscale installation completed"
+
+    - name: Verify Tailscale Installation
+      run: |
+        # التحقق من تثبيت Tailscale
+        Start-Sleep -Seconds 5
+        
+        # محاولة تشغيل الخدمة
+        try {
+            Get-Service -Name "Tailscale*" -ErrorAction Stop
+            Write-Host "Tailscale service found"
+        }
+        catch {
+            Write-Host "Tailscale service not found, trying to locate executable..."
+            # البحث عن Tailscale في المسارات الشائعة
+            $tailscaleExe = Get-ChildItem "C:\Program Files*\Tailscale*\tailscale.exe" -ErrorAction SilentlyContinue
+            if ($tailscaleExe) {
+                Write-Host "Tailscale found at: $($tailscaleExe.FullName)"
+            } else {
+                Write-Error "Tailscale not installed properly"
+                exit 1
+            }
+        }
 
     - name: Start Tailscale and Get IP
       run: |
-        # Start Tailscale service
-        Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+        # تشغيل Tailscale
+        Write-Host "Starting Tailscale..."
+        
+        # إعادة تشغيل الخدمة للتأكد
+        Restart-Service -Name "Tailscale" -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 10
         
-        # Authenticate and get IP
+        # المصادقة
+        Write-Host "Authenticating with Tailscale..."
         tailscale up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-server-${{ github.run_id }}
         
-        # Get Tailscale IP
+        # الحصول على IP
+        Write-Host "Getting Tailscale IP..."
         $tailscaleIP = tailscale ip --4
         if (-not $tailscaleIP) {
-            # If first command fails, try alternative
+            Write-Host "Trying alternative method to get IP..."
             $tailscaleIP = tailscale status --json | ConvertFrom-Json | Select-Object -ExpandProperty Self | Select-Object -ExpandProperty TailscaleIPs | Select-Object -First 1
         }
-        echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
         
-        # Display results
+        if ($tailscaleIP) {
+            echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
+            Write-Host "Tailscale IP: $tailscaleIP"
+        } else {
+            Write-Error "Could not get Tailscale IP"
+            exit 1
+        }
+        
+        # عرض النتائج
         echo "=== Deployment Complete ==="
         echo "RDP Credentials: $env:RDP_CREDS"
         echo "Tailscale IP: $tailscaleIP"
