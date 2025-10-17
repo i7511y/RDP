@@ -62,13 +62,14 @@ jobs:
 
     - name: Install Tailscale
       run: |
+        # الرابط الصحيح - تم تصحيح tailscale
         $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
         $tsInstallerPath = "$env:TEMP\tailscale.msi"
         
         # Download Tailscale
         Invoke-WebRequest -Uri $tsurl -OutFile $tsInstallerPath
         
-        # Install silently
+        # Install silently - تم تصحيح msiexec
         Start-Process msiexec -ArgumentList "/i", "$tsInstallerPath", "/quiet", "/norestart" -Wait
         
         # Wait for installation
@@ -80,7 +81,7 @@ jobs:
         Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 5
         
-        # Authenticate and get IP (you need to set TAILSCALE_AUTH_KEY as GitHub secret)
+        # Authenticate and get IP
         tailscale up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-server-${{ github.run_id }}
         
         # Get Tailscale IP
