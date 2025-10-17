@@ -61,25 +61,19 @@ jobs:
 
     - name: Install Tailscale
       run: |
-        # الروابط الصحيحة لـ Tailscale - تم التصحيح
-        $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
+        # الروابط الصحيحة - تم التصحيح
+        $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.exe"
+        $tsInstallerPath = "$env:TEMP\tailscale.exe"
         
-        # رابط بديل إذا فشل الأول
-        $tsurl_backup = "https://tailscale.com/download/windows"
-        
-        $tsInstallerPath = "$env:TEMP\tailscale.msi"
+        Write-Host "Downloading Tailscale from: $tsurl"
         
         # تحميل Tailscale
-        Write-Host "Downloading Tailscale from primary URL..."
         try {
             Invoke-WebRequest -Uri $tsurl -OutFile $tsInstallerPath -UserAgent "GitHub-Actions"
         }
         catch {
-            Write-Host "Primary URL failed, trying alternative method..."
-            # طريقة بديلة باستخدام .exe إذا فشل .msi
-            $tsurl_exe = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.exe"
-            $tsInstallerPath = "$env:TEMP\tailscale.exe"
-            Invoke-WebRequest -Uri $tsurl_exe -OutFile $tsInstallerPath -UserAgent "GitHub-Actions"
+            Write-Error "Download failed: $($_.Exception.Message)"
+            exit 1
         }
         
         # التحقق من التحميل
@@ -92,12 +86,7 @@ jobs:
         
         # التثبيت
         Write-Host "Installing Tailscale..."
-        if ($tsInstallerPath -like "*.msi") {
-            Start-Process msiexec -ArgumentList "/i", "`"$tsInstallerPath`"", "/quiet", "/norestart" -Wait -NoNewWindow
-        } else {
-            # إذا كان .exe
-            Start-Process -FilePath $tsInstallerPath -ArgumentList "/S" -Wait -NoNewWindow
-        }
+        Start-Process -FilePath $tsInstallerPath -ArgumentList "/S" -Wait -NoNewWindow
         
         # الانتظار للتثبيت
         Start-Sleep -Seconds 30
@@ -108,18 +97,40 @@ jobs:
         Write-Host "Verifying Tailscale installation..."
         Start-Sleep -Seconds 10
         
-        # التحقق من تثبيت Tailscale بعدة طرق
-        $service = Get-Service -Name "Tailscale*" -ErrorAction SilentlyContinue
+        # التحقق من التثبيت بعدة طرق
+        $service = Get-Service -Name "Tailscale" -ErrorAction SilentlyContinue
         $process = Get-Process -Name "tailscale*" -ErrorAction SilentlyContinue
-        $exePath = Get-ChildItem "C:\Program Files*\Tailscale*\tailscale.exe" -ErrorAction SilentlyContinue
+        
+        # البحث عن الملف في المسارات المحتملة
+        $possiblePaths = @(
+            "C:\Program Files\Tailscale\tailscale.exe",
+            "C:\Program Files (x86)\Tailscale\tailscale.exe",
+            "$env:PROGRAMFILES\Tailscale\tailscale.exe",
+            "$env:PROGRAMFILES(X86)\Tailscale\tailscale.exe"
+        )
+        
+        $exePath = $null
+        foreach ($path in $possiblePaths) {
+            if (Test-Path $path) {
+                $exePath = $path
+                break
+            }
+        }
         
         if ($service -or $process -or $exePath) {
             Write-Host "✓ Tailscale installed successfully"
-            if ($service) { Write-Host "  Service: $($service.Name)" }
+            if ($service) { Write-Host "  Service: $($service.Name) - Status: $($service.Status)" }
             if ($process) { Write-Host "  Process: $($process.Name)" }
-            if ($exePath) { Write-Host "  Executable: $($exePath.FullName)" }
+            if ($exePath) { Write-Host "  Executable: $exePath" }
+            
+            # إضافة المسار إلى environment variable للاستخدام لاحقاً
+            if ($exePath) {
+                echo "TAILSCALE_PATH=$exePath" >> $env:GITHUB_ENV
+            }
         } else {
             Write-Error "✗ Tailscale not found after installation"
+            Write-Host "Searching in all program files..."
+            Get-ChildItem "C:\Program Files*\Tailscale*" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "Found: $($_.FullName)" }
             exit 1
         }
 
@@ -127,30 +138,43 @@ jobs:
       run: |
         Write-Host "Starting Tailscale connection..."
         
-        # إعادة تشغيل الخدمة
+        # تحديد مسار tailscale
+        if (-not $env:TAILSCALE_PATH) {
+            $tailscaleExe = "C:\Program Files\Tailscale\tailscale.exe"
+        } else {
+            $tailscaleExe = $env:TAILSCALE_PATH
+        }
+        
+        if (-not (Test-Path $tailscaleExe)) {
+            Write-Error "Tailscale executable not found at: $tailscaleExe"
+            exit 1
+        }
+        
+        Write-Host "Using Tailscale from: $tailscaleExe"
+        
+        # تشغيل الخدمة
         try {
-            Restart-Service -Name "Tailscale" -Force -ErrorAction Stop
-            Write-Host "✓ Tailscale service restarted"
+            Start-Service -Name "Tailscale" -ErrorAction Stop
+            Write-Host "✓ Tailscale service started"
         }
         catch {
-            Write-Host "⚠ Could not restart service, trying to start..."
-            Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+            Write-Host "⚠ Service start failed, trying direct execution..."
         }
         
         Start-Sleep -Seconds 10
         
         # المصادقة
         Write-Host "Authenticating with Tailscale..."
-        & "C:\Program Files\Tailscale\tailscale.exe" up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-server-${{ github.run_id }}
+        & "$tailscaleExe" up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-server-${{ github.run_id }}
         
         # الحصول على IP
         Write-Host "Getting Tailscale IP..."
         Start-Sleep -Seconds 10
         
-        $tailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip --4
+        $tailscaleIP = & "$tailscaleExe" ip --4
         if (-not $tailscaleIP) {
             Write-Host "Trying alternative method to get IP..."
-            $status = & "C:\Program Files\Tailscale\tailscale.exe" status --json
+            $status = & "$tailscaleExe" status --json
             $json = $status | ConvertFrom-Json
             $tailscaleIP = $json.Self.TailscaleIPs[0]
         }
@@ -161,7 +185,7 @@ jobs:
         } else {
             Write-Error "✗ Could not get Tailscale IP"
             Write-Host "Current status:"
-            & "C:\Program Files\Tailscale\tailscale.exe" status
+            & "$tailscaleExe" status
             exit 1
         }
         
@@ -175,9 +199,8 @@ jobs:
       run: |
         Write-Host ""
         Write-Host "=== CONNECTION INFORMATION ==="
-        Write-Host "RDP Username: RDPUser"
+        Write-Host "RDP Username: RDPUser" 
         Write-Host "RDP Password: (check RDP_CREDS in environment)"
         Write-Host "Tailscale IP: $env:TAILSCALE_IP"
         Write-Host "Connect using: mstsc /v:$env:TAILSCALE_IP"
         Write-Host ""
-        Write-Host "To get the password, check the 'Create RDP User with Secure Password' step output"
