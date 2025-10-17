@@ -1,0 +1,100 @@
+name: Deploy Windows Server with Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Enable RDP and configure
+      run: |
+        # Enable Remote Desktop
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+        
+        # Remove existing rule if any
+        netsh advfirewall firewall delete rule name="RDP-Tailscale" || true
+        
+        # Add firewall rule for RDP
+        netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+        
+        # Restart RDP service
+        Restart-Service -Name "TermService" -Force
+
+    - name: Create RDP User with Secure Password
+      run: |
+        Add-Type -AssemblyName System.Web
+        
+        $Chars = @{
+            Upper = [char[]](65..90)    # A-Z
+            Lower = [char[]](97..122)   # a-z
+            Number = [char[]](48..57)   # 0-9
+            Special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
+        }
+        
+        $tempPassword = @()
+        $tempPassword += $Chars.Upper | Get-Random -Count 2
+        $tempPassword += $Chars.Lower | Get-Random -Count 2
+        $tempPassword += $Chars.Number | Get-Random -Count 2
+        $tempPassword += $Chars.Special | Get-Random -Count 2
+        
+        $password = -join ($tempPassword | Sort-Object { Get-Random })
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        # Create user
+        New-LocalUser -Name "RDPUser" -Password $securePassword -Description "RDP Access User"
+        
+        # Add to groups
+        Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+        
+        # Store credentials in environment variable
+        echo "RDP_CREDS=User: RDPUser | Password: $password" >> $env:GITHUB_ENV
+        
+        # Verify user creation
+        if (-not (Get-LocalUser -Name "RDPUser" -ErrorAction SilentlyContinue)) {
+            Write-Error "User creation failed"
+            exit 1
+        }
+
+    - name: Install Tailscale
+      run: |
+        $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
+        $tsInstallerPath = "$env:TEMP\tailscale.msi"
+        
+        # Download Tailscale
+        Invoke-WebRequest -Uri $tsurl -OutFile $tsInstallerPath
+        
+        # Install silently
+        Start-Process msiexec -ArgumentList "/i", "$tsInstallerPath", "/quiet", "/norestart" -Wait
+        
+        # Wait for installation
+        Start-Sleep -Seconds 10
+
+    - name: Start Tailscale and Get IP
+      run: |
+        # Start Tailscale service
+        Start-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+        
+        # Authenticate and get IP (you need to set TAILSCALE_AUTH_KEY as GitHub secret)
+        tailscale up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=windows-server-${{ github.run_id }}
+        
+        # Get Tailscale IP
+        $tailscaleIP = tailscale ip --4
+        echo "TAILSCALE_IP=$tailscaleIP" >> $env:GITHUB_ENV
+        
+        # Display results
+        echo "=== Deployment Complete ==="
+        echo "RDP Credentials: $env:RDP_CREDS"
+        echo "Tailscale IP: $tailscaleIP"
+
+    - name: Show Connection Info
+      run: |
+        echo "=== CONNECTION INFORMATION ==="
+        echo "RDP Details: $env:RDP_CREDS"
+        echo "Tailscale IP: $env:TAILSCALE_IP"
+        echo "Connect using: mstsc /v:$env:TAILSCALE_IP"
