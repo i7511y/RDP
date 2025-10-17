@@ -1,4 +1,4 @@
-name: Deploy Windows Server with Tailscale
+name: RDP
 
 on:
   workflow_dispatch:
@@ -43,25 +43,25 @@ jobs:
         $password = -join ($tempPassword | Sort-Object { Get-Random })
         $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
         
-        # Create user
-        New-LocalUser -Name "RDPUser" -Password $securePassword -Description "RDP Access User"
+        # Create user - تم تغيير الاسم إلى RDP فقط
+        New-LocalUser -Name "RDP" -Password $securePassword -Description "RDP Access User"
         
         # Add to groups
-        Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
-        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+        Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
         
-        # Store credentials
-        echo "RDP_CREDS=User: RDPUser | Password: $password" >> $env:GITHUB_ENV
+        # Store credentials - تم تحديث الاسم
+        echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
         
-        # Verify user creation
-        if (-not (Get-LocalUser -Name "RDPUser" -ErrorAction SilentlyContinue)) {
+        # Verify user creation - تم تحديث الاسم
+        if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
             Write-Error "User creation failed"
             exit 1
         }
 
     - name: Install Tailscale
       run: |
-        # الروابط الصحيحة - تم التصحيح
+        # الرابط الصحيح لـ Tailscale
         $tsurl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.exe"
         $tsInstallerPath = "$env:TEMP\tailscale.exe"
         
@@ -199,8 +199,9 @@ jobs:
       run: |
         Write-Host ""
         Write-Host "=== CONNECTION INFORMATION ==="
-        Write-Host "RDP Username: RDPUser" 
+        Write-Host "RDP Username: RDP"
         Write-Host "RDP Password: (check RDP_CREDS in environment)"
         Write-Host "Tailscale IP: $env:TAILSCALE_IP"
         Write-Host "Connect using: mstsc /v:$env:TAILSCALE_IP"
         Write-Host ""
+        Write-Host "To get the password, check the 'Create RDP User with Secure Password' step output"
